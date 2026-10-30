@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumi · IELTS Speaking Companion</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+<header>
+ <div class="brand"><div class="brand-mark">✦</div><div><b>LUMI</b><small>YOUR LIVE SPEAKING COMPANION</small></div></div>
+ <div class="top-right"><span id="livePill" class="live-pill"><i></i>OFFLINE</span><button class="icon-btn" id="settingsBtn">⚙</button></div>
+</header>
+<div id="settings" class="settings-pop" hidden>
+ <label>ROBOT VOICE<select id="voice"><option value="marin">Marin · natural</option><option value="cedar">Cedar · warm</option><option value="coral">Coral · bright</option><option value="sage">Sage · calm</option></select></label>
+ <label>PERSONALITY<select id="personality"><option>Warm, playful and curious</option><option>Calm, thoughtful and supportive</option><option>Energetic, witty and expressive</option></select></label>
+ <p>Voice settings apply when you start a new session.</p>
+</div>
+<main>
+ <div class="ambient a1"></div><div class="ambient a2"></div>
+ <div class="eyebrow">✧ &nbsp; A LITTLE AI MAGIC, JUST FOR YOU</div>
+ <div id="stage" class="stage idle">
+  <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="floor-glow"></div>
+  <div class="robot-wrap"><div class="robot-shadow"></div><img id="robot" class="robot-img" src="/static/robot1.png" alt="Lumi robot"><div class="voice-ring"></div></div>
+  <div class="state-caption"><span class="state-dot"></span><span id="faceStatus">WAITING FOR YOU</span></div>
+ </div>
+ <h1 id="headline">Your new speaking buddy.</h1>
+ <p class="subtitle" id="status">A voice that listens, thinks and talks back — naturally.</p>
+ <div class="controls" id="controls"><button class="start-btn" id="startBtn"><span class="start-icon">◉</span><span>Start talking<small>Connect to your AI companion</small></span></button></div>
+ <div class="hint">♬ &nbsp; For the best experience, use headphones and allow microphone access.</div>
+ <div class="captions"><div class="caption-head"><span>▤ &nbsp; LIVE CAPTIONS</span><button id="clearBtn">Clear</button></div>
+ <div class="caption-lines"><p><b>You</b><span id="youText">Your words will appear here as you speak…</span></p><p><b>Lumi</b><span id="lumiText">What I say will appear here…</span></p></div></div>
+</main>
+<footer><span>LUMI · LIVE SPEAKING COMPANION</span><span>Built for curious minds ♡</span></footer>
+<audio id="remoteAudio" autoplay playsinline></audio>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let pc=null, dc=null, mic=null, connected=false, muted=false, transcript='', reply='';
+let audioCtx=null, analyser=null, raf=null;
+function setState(s, message) {
+ $('stage').className='stage '+s;
+ $('faceStatus').textContent=({idle:'WAITING FOR YOU',listening:'LISTENING TO YOU',thinking:'THINKING',speaking:'LUMI IS SPEAKING'})[s];
+ $('robot').src='/static/robot'+({idle:1,listening:1,thinking:2,speaking:3})[s]+'.png';
+ if(message) $('status').textContent=message;
+ $('headline').textContent=connected?(s==='speaking'?'I’m right here with you.':s==='thinking'?'Let me think…':'Tell me anything.'):'Your new speaking buddy.';
+}
+function addText(id, text){const el=$(id);el.textContent=text;}
+function showTranscript(){addText('youText',transcript||'Your words will appear here as you speak…');addText('lumiText',reply||'What I say will appear here…');}
+async function connect(){
+ try {
+  setState('thinking','Connecting to Lumi…');
+  const tokenRes=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:$('voice').value,personality:$('personality').value})});
+  const tokenData=await tokenRes.json();
+  if(!tokenRes.ok) throw new Error(tokenData.error||'Live sessiya yaratilmadi.');
+  const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  mic=stream; pc=new RTCPeerConnection(); stream.getTracks().forEach(t=>pc.addTrack(t,stream));
+  const remote=new MediaStream(); $('remoteAudio').srcObject=remote;
+  pc.ontrack=e=>{e.streams[0].getTracks().forEach(t=>remote.addTrack(t));$('remoteAudio').play().catch(()=>{});startMouth(remote);};
+  dc=pc.createDataChannel('oai-events');
+  dc.onopen=()=>{connected=true;$('livePill').classList.add('on');$('livePill').innerHTML='<i></i>LIVE SESSION';renderControls();setState('listening','I’m listening. Say hello!');};
+  dc.onmessage=e=>handleEvent(JSON.parse(e.data));
+  pc.onconnectionstatechange=()=>{if(['failed','disconnected','closed'].includes(pc.connectionState)&&pc.connectionState==='failed')$('status').textContent='Connection interrupted. Try reconnecting.';};
+  const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+  const answer=await fetch('https://api.openai.com/v1/realtime/calls',{method:'POST',headers:{Authorization:'Bearer '+tokenData.client_secret,'Content-Type':'application/sdp'},body:offer.sdp});
+  if(!answer.ok)throw new Error('Realtime connection failed: '+await answer.text());
+  await pc.setRemoteDescription({type:'answer',sdp:await answer.text()});
+ } catch(err){console.error(err);$('status').textContent=err.message;disconnect(false);}
+}
+function handleEvent(ev){
+ if(ev.type==='input_audio_buffer.speech_started')setState('listening','You’re speaking…');
+ if(ev.type==='input_audio_buffer.speech_stopped'||ev.type==='response.created')setState('thinking','Lumi is thinking…');
+ if(ev.type==='response.output_audio.delta')setState('speaking','Lumi is talking to you…');
+ if(ev.type==='response.output_audio_transcript.delta'){reply+=ev.delta||'';showTranscript();}
+ if(ev.type==='conversation.item.input_audio_transcription.completed'){transcript+=(transcript?' ':'')+(ev.transcript||'');showTranscript();}
+ if(ev.type==='response.done')setState('listening','Your turn. I’m listening…');
+ if(ev.type==='error')$('status').textContent=ev.error?.message||'Something went wrong';
+}
+function startMouth(stream){
+ try{audioCtx=new (window.AudioContext||window.webkitAudioContext)();const src=audioCtx.createMediaStreamSource(stream);analyser=audioCtx.createAnalyser();analyser.fftSize=256;src.connect(analyser);const data=new Uint8Array(analyser.frequencyBinCount);
+ const tick=()=>{analyser.getByteFrequencyData(data);const energy=data.reduce((a,b)=>a+b,0)/data.length;document.documentElement.style.setProperty('--mouth-open',Math.min(1,energy/65));raf=requestAnimationFrame(tick);};tick();}catch(e){}
+}
+function renderControls(){
+ $('controls').innerHTML='<button class="round-control" id="muteBtn">🎙</button><button class="end-btn" id="endBtn">⏻ &nbsp; End session</button><span class="secure-note">● Private live connection</span>';
+ $('muteBtn').onclick=toggleMute;$('endBtn').onclick=()=>disconnect();
+}
+function toggleMute(){if(!mic)return;muted=!muted;mic.getAudioTracks().forEach(t=>t.enabled=!muted);$('muteBtn').textContent=muted?'🔇':'🎙';$('muteBtn').classList.toggle('muted',muted);}
+function disconnect(show=true){
+ if(raf)cancelAnimationFrame(raf);if(dc){try{dc.close()}catch(e){}dc=null;}if(pc){try{pc.close()}catch(e){}pc=null;}
+ if(mic){mic.getTracks().forEach(t=>t.stop());mic=null;}if($('remoteAudio'))$('remoteAudio').srcObject=null;
+ connected=false;muted=false;$('livePill').classList.remove('on');$('livePill').innerHTML='<i></i>OFFLINE';
+ $('controls').innerHTML='<button class="start-btn" id="startBtn"><span class="start-icon">◉</span><span>Start talking<small>Connect to your AI companion</small></span></button>';
+ $('startBtn').onclick=connect;setState('idle',show?'Session ended. See you soon.':'Ready when you are');
+}
+$('startBtn').onclick=connect;
+$('settingsBtn').onclick=()=>{$('settings').hidden=!$('settings').hidden;};
+$('clearBtn').onclick=()=>{transcript='';reply='';showTranscript();};
+window.addEventListener('beforeunload',()=>disconnect(false));
+</script>
+</body></html>
